@@ -7,7 +7,7 @@ import { cosineSimilarity } from './utils/similarity'; // Import similarity util
 // import './App.css'; // Removed as the file doesn't exist yet
 
 // --- Constants ---
-const FACE_CLUSTER_THRESHOLD = 0.4; // Cosine similarity threshold for ArcFace
+const FACE_CLUSTER_THRESHOLD = 0.45; // Increased threshold further
 
 // --- Type Definitions ---
 
@@ -192,49 +192,67 @@ function App() {
 
     // --- Clustering Logic ---
     const updateClusters = useCallback(() => {
-        console.log("Updating clusters...");
+        console.log("Updating clusters... Threshold:", FACE_CLUSTER_THRESHOLD);
         let updatedClusters = [...clusters];
         let updatedFaces = { ...allDetectedFaces };
         let changed = false;
 
         const facesToCluster = Object.values(updatedFaces).filter(face => !face.clusterId && face.embedding);
+        console.log(`Found ${facesToCluster.length} faces to cluster.`);
 
         facesToCluster.forEach(face => {
-            if (!face.embedding) return; // Should not happen due to filter, but safeguard
+            if (!face.embedding) return;
 
             let bestMatchClusterId: string | null = null;
-            let highestSimilarity = -1; // Cosine similarity range is -1 to 1
+            let highestSimilarity = -1; // Start below valid range
 
             updatedClusters.forEach(cluster => {
-                const similarity = cosineSimilarity(face.embedding!, cluster.representativeEmbedding);
-                // console.log(`Comparing face ${face.faceId} to cluster ${cluster.id} (${cluster.name}): Similarity ${similarity.toFixed(3)}`);
+                if (!cluster.representativeEmbedding || cluster.representativeEmbedding.length === 0) {
+                     console.warn(`Cluster ${cluster.id} (${cluster.name}) has invalid representativeEmbedding.`);
+                     return;
+                }
+
+                // --- MORE DEBUG LOGGING: Check vectors before comparison ---
+                const faceEmbedding = face.embedding!;
+                const clusterEmbedding = cluster.representativeEmbedding;
+                console.log(`   -> Comparing Face ${face.faceId.slice(-6)} Embedding[0..3]: [${faceEmbedding.slice(0,4).map(v => v.toFixed(4)).join(', ')}]`);
+                console.log(`   ->   vs Cluster ${cluster.id.slice(-6)} Embedding[0..3]: [${clusterEmbedding.slice(0,4).map(v => v.toFixed(4)).join(', ')}]`);
+                // --- END MORE DEBUG LOGGING ---
+
+                const similarity = cosineSimilarity(faceEmbedding, clusterEmbedding);
+                console.log(` - Comparing Face ${face.faceId.slice(-6)} (img: ${face.imageId}) to Cluster ${cluster.id.slice(-6)} (${cluster.name}): Similarity = ${similarity.toFixed(4)}`);
+
+                if (isNaN(similarity)) {
+                    console.warn(`   -> NaN similarity score detected! Skipping comparison.`);
+                    return;
+                }
+
                 if (similarity > FACE_CLUSTER_THRESHOLD && similarity > highestSimilarity) {
                     highestSimilarity = similarity;
                     bestMatchClusterId = cluster.id;
+                    console.log(`   -> Potential best match found: Cluster ${cluster.id.slice(-6)} (${cluster.name}) with similarity ${similarity.toFixed(4)}`);
                 }
             });
 
             if (bestMatchClusterId) {
-                // Assign to existing cluster
                 const clusterIndex = updatedClusters.findIndex(c => c.id === bestMatchClusterId);
                 if (clusterIndex !== -1) {
                     updatedClusters[clusterIndex].faceIds.push(face.faceId);
                     updatedFaces[face.faceId].clusterId = bestMatchClusterId;
-                    // console.log(`Assigned face ${face.faceId} to existing cluster ${bestMatchClusterId}`);
+                    console.log(` -> Assigned Face ${face.faceId.slice(-6)} to existing Cluster ${bestMatchClusterId.slice(-6)}`);
                     changed = true;
                 }
             } else {
-                // Create new cluster
                 const newClusterId = `cluster-${Date.now()}-${Math.random().toString(16).slice(2)}`;
                 const newCluster: Cluster = {
                     id: newClusterId,
                     name: `Cluster ${updatedClusters.length + 1}`,
                     faceIds: [face.faceId],
-                    representativeEmbedding: face.embedding,
+                    representativeEmbedding: [...face.embedding!], 
                 };
                 updatedClusters.push(newCluster);
                 updatedFaces[face.faceId].clusterId = newClusterId;
-                // console.log(`Created new cluster ${newClusterId} for face ${face.faceId}`);
+                console.log(` -> Created new Cluster ${newClusterId.slice(-6)} for Face ${face.faceId.slice(-6)}`);
                 changed = true;
             }
         });
@@ -244,11 +262,11 @@ function App() {
             setClusters(updatedClusters);
             setAllDetectedFaces(updatedFaces);
         }
-        needsClusteringUpdate.current = false; // Reset flag
-    }, [allDetectedFaces, clusters]); // Dependencies
+        needsClusteringUpdate.current = false;
+    }, [allDetectedFaces, clusters]);
 
     // Effect to run clustering when needed
-    useEffect(() => {
+  useEffect(() => {
         if (needsClusteringUpdate.current) {
             updateClusters();
         }
@@ -306,9 +324,9 @@ function App() {
         fileInputRef.current?.click();
     };
 
-    return (
-        <div className="App">
-            <h1>Vibe Vision Workshop</h1>
+  return (
+    <div className="App">
+      <h1>Vibe Vision Workshop</h1>
 
             {/* --- Controls --- */}
             <div className="controls">
@@ -352,22 +370,38 @@ function App() {
                     <h2>Face Clusters</h2>
                     {clusters.map((cluster) => (
                         <div key={cluster.id} className="cluster-item">
-                            <input
-                                type="text"
-                                value={cluster.name}
-                                onChange={(e) => handleClusterNameChange(cluster.id, e.target.value)}
-                                placeholder="Enter name..."
-                            />
-                            <span>({cluster.faceIds.length} faces)</span>
-                            {/* Optional: Show representative face thumbnail */}
+                            <div className="cluster-header">
+                                <input
+                                    type="text"
+                                    value={cluster.name}
+                                    onChange={(e) => handleClusterNameChange(cluster.id, e.target.value)}
+                                    placeholder="Enter name..."
+                                    title={`Cluster ID: ${cluster.id}`}
+                                />
+                                <span>({cluster.faceIds.length} faces)</span>
+                            </div>
+                            {/* List the faces within the cluster */} 
+                            <ul className="cluster-faces-list">
+                                {cluster.faceIds.map((faceId) => {
+                                    const faceData = allDetectedFaces[faceId];
+                                    // Display face ID suffix and image ID (webcam or static ID suffix)
+                                    const faceIdSuffix = faceId.split('-').pop()?.substring(0, 6) || 'N/A';
+                                    const imageIdSuffix = faceData?.imageId === 'webcam' ? 'webcam' : (faceData?.imageId.split('-').pop()?.substring(0, 6) || 'unknown');
+                                    return (
+                                        <li key={faceId} className="cluster-face-item" title={`Face ID: ${faceId}, Image ID: ${faceData?.imageId}`}>
+                                            Face: {faceIdSuffix} (from Img: {imageIdSuffix})
+                                        </li>
+                                    );
+                                })}
+                            </ul>
                         </div>
                     ))}
                 </div>
             )}
 
             {/* TODO: Add section for face clustering/naming */}
-        </div>
-    );
+    </div>
+  );
 }
 
 export default App; 

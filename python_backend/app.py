@@ -6,12 +6,13 @@ import time
 from functools import wraps
 import traceback
 
-import google.generativeai as genai
+import google.genai as genai
 import numpy as np
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request
 from PIL import Image
 import cv2 # OpenCV for image processing
+from google.genai import types as genai_types # Import types at module level
 
 # --- Model Imports (potentially time-consuming) ---
 print("Loading models...")
@@ -48,25 +49,24 @@ app = Flask(__name__)
 
 # --- Gemini Configuration ---
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
-MODEL_NAME = "gemini-1.5-flash"
-genai_model = None
+MODEL_NAME = "gemini-1.5-flash-latest"  # Use a stable, recent model
+GEMINI_IMAGE_GEN_MODEL_NAME = "gemini-2.0-flash-exp-image-generation" # Use the same model if it supports image generation, or a dedicated one like "imagen" if needed and available
+# Note: The specific 'gemini-2.0-flash-exp-image-generation' might be deprecated or replaced.
+# Using a standard multimodal model like 1.5 Flash is often sufficient for both text/vision and basic image generation/editing.
+# If advanced image generation (like Imagen) is needed, a different client/method might be required.
+
+client = None
 if GEMINI_API_KEY:
     try:
-        genai.configure(api_key=GEMINI_API_KEY)
-        genai_model = genai.GenerativeModel(
-            MODEL_NAME,
-            safety_settings=[
-                {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
-                {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
-                {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
-                {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
-            ]
-        )
-        print("Gemini Model Initialized Successfully.")
+        # Initialize the client - it reads GOOGLE_API_KEY env var automatically
+        # Or pass explicitly: client = genai.Client(api_key=GEMINI_API_KEY)
+        client = genai.Client(api_key=GEMINI_API_KEY)
+        print("Gemini Client Initialized Successfully.")
     except Exception as e:
-        print(f"Error initializing Gemini Model: {e}")
+        print(f"Error initializing Gemini Client: {e}")
+        client = None # Ensure client is None if initialization fails
 else:
-    print("Gemini model not initialized due to missing API key.")
+    print("Gemini client not initialized due to missing API key.")
 
 # --- Helper Functions ---
 def require_image_data(f):
@@ -236,7 +236,7 @@ def detect_posture(image_data_b64, request_data):
 @app.route('/api/arcface/detect-faces', methods=['POST'])
 @require_image_data
 def detect_faces(image_data_b64, request_data):
-    print('DeepFace Service: Detecting faces...')
+    print('DeepFace Service: Detecting faces and extracting embeddings...')
     if not DeepFace:
          return jsonify({"message": "DeepFace library not loaded"}), 500
 
@@ -245,179 +245,276 @@ def detect_faces(image_data_b64, request_data):
         return jsonify({"message": "Failed to decode image data"}), 400
 
     try:
-        # Use DeepFace.analyze to get bounding box and landmarks
-        # Use ArcFace model for embeddings, specify detector backend if needed
-        # Set actions to just 'embedding' and 'landmark' to avoid emotion/age/etc.
-        # enforce_detection=False allows processing images with no faces found
-        results = DeepFace.analyze(
+        # 1. Extract faces using a detector that provides landmarks (like retinaface)
+        # Setting align=True is recommended for better embedding quality with represent()
+        extracted_faces_info = DeepFace.extract_faces(
             img_path=img_cv2,
-            actions=['embedding', 'landmarks'],
-            model_name='ArcFace', # Specify the model for embeddings
-            detector_backend='retinaface', # Example detector, others available
-            enforce_detection=False,
-            silent=True # Reduce console output
+            detector_backend='retinaface',
+            enforce_detection=False, # Don't error if no face found
+            align=True # Get aligned face chips for represent()
         )
-        
+
         detected_faces_output = []
-        # DeepFace returns a list of dicts, one per detected face
-        if isinstance(results, list):
-             for face_data in results:
-                # Extract region (bounding box) and landmarks
-                region = face_data.get('region') # Format: {'x': int, 'y': int, 'w': int, 'h': int}
-                facial_landmarks = face_data.get('landmarks') # Format: {'right_eye': [x,y], 'left_eye': ...}
-                embedding = face_data.get('embedding')
 
-                if region and facial_landmarks:
-                    # Convert region to [x1, y1, x2, y2] format
-                    x1, y1, w, h = region['x'], region['y'], region['w'], region['h']
-                    box = [x1, y1, x1 + w, y1 + h]
+        # Check if extract_faces returned any results
+        if not isinstance(extracted_faces_info, list):
+            print("Warning: DeepFace.extract_faces did not return a list as expected.")
+            extracted_faces_info = [] # Treat as empty list to avoid errors
 
-                    # Convert landmarks dict to simple list [[x,y], ...]
-                    # Order might vary based on detector, but we grab what's available
-                    landmarks_list = list(facial_landmarks.values())
+        # 2. Iterate through extracted faces and get embeddings for each
+        for face_info in extracted_faces_info:
+            # Ensure we have the necessary info from extract_faces
+            face_img_np = face_info.get('face') # Aligned face chip as numpy array
+            facial_area = face_info.get('facial_area') # Original bounding box {'x', 'y', 'w', 'h'}
+            landmarks = face_info.get('landmarks') # Landmarks {'right_eye': [x,y], ...}
+            confidence = face_info.get('confidence') # Detection confidence
 
-                    detected_faces_output.append({
-                        "box": box,
-                        "landmarks": landmarks_list,
-                        "embedding": embedding
-                    })
+            # Skip if essential info is missing (e.g., align=False might not return 'face')
+            if face_img_np is None or facial_area is None:
+                 print(f"Warning: Skipping face due to missing 'face' or 'facial_area'. Confidence: {confidence}")
+                 continue
 
-        print(f"DeepFace: Found {len(detected_faces_output)} faces.")
+            try:
+                 # --- DEBUG: Save the aligned face chip being processed ---
+                 # Create a unique filename
+                 timestamp = time.time()
+                 debug_face_filename = f"debug_face_{timestamp}_{facial_area['x']}_{facial_area['y']}.jpg"
+                 # Ensure the input is in the correct format for imwrite (BGR, uint8)
+                 # DeepFace usually returns BGR numpy arrays
+                 if face_img_np.ndim == 3 and face_img_np.shape[2] == 3:
+                     try:
+                        # Convert float image (often 0-1) back to uint8 (0-255) if needed
+                        if face_img_np.dtype == np.float32 or face_img_np.dtype == np.float64:
+                             face_to_save = (face_img_np * 255).astype(np.uint8)
+                        else:
+                             face_to_save = face_img_np.astype(np.uint8) # Ensure uint8
+
+                        save_success = cv2.imwrite(debug_face_filename, face_to_save)
+                        if save_success:
+                             print(f"DEBUG: Saved aligned face chip to {debug_face_filename}")
+                        else:
+                             print(f"DEBUG: FAILED to save aligned face chip to {debug_face_filename}")
+                     except Exception as save_err:
+                        print(f"DEBUG: Error saving face chip {debug_face_filename}: {save_err}")
+                 else:
+                      print(f"DEBUG: Cannot save face chip, unexpected shape/dims: {face_img_np.shape}, dtype: {face_img_np.dtype}")
+                 # --- END DEBUG ---
+
+                 # 3. Get embedding for the ALIGNED face chip
+                 embedding_objs = DeepFace.represent(
+                     img_path=face_img_np,
+                     model_name='VGG-Face', # Changed model again
+                     enforce_detection=False # We already know it's a face
+                 )
+                 
+                 # represent() usually returns a list containing one dict for the single face chip
+                 if not embedding_objs or not isinstance(embedding_objs, list) or len(embedding_objs) == 0 or 'embedding' not in embedding_objs[0]:
+                      print(f"Warning: Could not get embedding for face at {facial_area}. Skipping.")
+                      continue
+                 embedding = embedding_objs[0]['embedding']
+
+                 # --- DEBUG LOGGING: Print first few embedding values ---
+                 print(f"DEBUG: Embedding generated for face at {facial_area}: {str(embedding[:5])}...") 
+                 # --- END DEBUG LOGGING ---
+
+                 # 4. Format the output for the frontend
+                 # Convert bounding box from {'x', 'y', 'w', 'h'} to [x1, y1, x2, y2]
+                 x1, y1, w, h = facial_area['x'], facial_area['y'], facial_area['w'], facial_area['h']
+                 box = [x1, y1, x1 + w, y1 + h]
+
+                 # Convert landmarks dict to list [[x,y], ...]
+                 landmarks_list = list(landmarks.values()) if landmarks and isinstance(landmarks, dict) else []
+
+                 detected_faces_output.append({
+                    "box": box,
+                    "landmarks": landmarks_list,
+                    "embedding": embedding,
+                    "confidence": confidence # Include detection confidence
+                 })
+
+            except Exception as represent_err:
+                 # Log error during represent() but continue if possible
+                 print(f"Error during DeepFace.represent for face at {facial_area}: {represent_err}")
+                 traceback.print_exc()
+
+        print(f"DeepFace: Successfully processed {len(detected_faces_output)} faces with embeddings.")
         return jsonify({"detectedFaces": detected_faces_output})
 
-    except ValueError as ve:
-         # Handle case where DeepFace enforce_detection=True and no face found
-         if "Face could not be detected" in str(ve):
-             print("DeepFace: No faces found.")
-             return jsonify({"detectedFaces": []}) # Return empty list
-         else:
-             print(f"Error during DeepFace analysis: {ve}")
-             traceback.print_exc()
-             return jsonify({"message": f"Error during face analysis: {ve}"}), 500
     except Exception as e:
-        print(f"Error during DeepFace analysis: {e}")
+        # Catch errors during extract_faces or other unexpected issues
+        print(f"Error during DeepFace face detection/embedding: {e}")
         traceback.print_exc()
-        return jsonify({"message": f"Error during face analysis: {e}"}), 500
+        # Check if it's the specific "no face detected" error when enforce_detection=True (though we set it False)
+        if "Face could not be detected" in str(e):
+             print("DeepFace (extract_faces): No faces found.")
+             return jsonify({"detectedFaces": []})
+        return jsonify({"message": f"Error during face processing: {e}"}), 500
 
 @app.route('/api/gemini/describe-image', methods=['POST'])
 @require_image_data
 def gemini_describe_image(image_data_b64, request_data):
     print('Gemini Service: Getting image description...')
-    if not genai_model:
-        return jsonify({"message": "Gemini model not initialized (check API key)"}), 500
-    
-    image_part = base64_to_gemini_part(image_data_b64)
-    if not image_part:
+    if not client:
+        return jsonify({"message": "Gemini client not initialized (check API key)"}), 500
+
+    image_part_dict = base64_to_gemini_part(image_data_b64)
+    if not image_part_dict:
         return jsonify({"message": "Could not process image data for Gemini"}), 400
-        
+
     try:
+        # Create image content using Part/inline_data - multiple options to try
+        # Option 1: Direct construction with keyword arguments
+        image_part_obj = genai_types.Part(
+            inline_data=genai_types.Blob(
+                mime_type=image_part_dict['mime_type'],
+                data=base64.b64decode(image_part_dict['data'])
+            )
+        )
+
         prompt = "Describe this image in detail."
-        response = genai_model.generate_content([prompt, image_part])
+        response = client.models.generate_content(
+            model=MODEL_NAME,
+            contents=[prompt, image_part_obj] # Pass the Part object
+        )
         print("Gemini Description Response:", response.text)
         return jsonify({"description": response.text})
+    except base64.binascii.Error as b64_error:
+        print(f"Error decoding base64 data: {b64_error}")
+        return jsonify({"message": f"Invalid base64 image data: {b64_error}"}), 400
     except Exception as e:
         print(f"Error calling Gemini API for description: {e}")
         error_message = str(e)
-        if hasattr(e, 'message'): error_message = e.message # Try to get more specific error
+        # Attempt to parse Pydantic validation errors for better feedback
+        if "validation error" in error_message.lower():
+             try:
+                 import json
+                 details = json.loads(error_message.split('\n', 1)[1] if '\n' in error_message else error_message)
+                 first_error = details[0]['msg'] if isinstance(details, list) and details else "Invalid input structure"
+                 error_message = f"Input Validation Error: {first_error}"
+             except: # Fallback if parsing fails
+                 pass # Keep original error message
+        elif hasattr(e, 'message'): error_message = e.message
+        traceback.print_exc()
         return jsonify({"message": f"Error communicating with Gemini: {error_message}"}), 500
 
 @app.route('/api/gemini/ask-about-image', methods=['POST'])
 @require_image_data
 def gemini_ask_about_image(image_data_b64, request_data):
     print('Gemini Service: Asking about image...')
-    if not genai_model:
-        return jsonify({"message": "Gemini model not initialized (check API key)"}), 500
+    if not client:
+        return jsonify({"message": "Gemini client not initialized (check API key)"}), 500
 
     prompt = request_data.get('prompt')
     if not prompt:
          return jsonify({"message": "Missing prompt"}), 400
 
-    image_part = base64_to_gemini_part(image_data_b64)
-    if not image_part:
+    image_part_dict = base64_to_gemini_part(image_data_b64)
+    if not image_part_dict:
         return jsonify({"message": "Could not process image data for Gemini"}), 400
-        
+
     try:
+        # Create image content using Part/inline_data
+        image_part_obj = genai_types.Part(
+            inline_data=genai_types.Blob(
+                mime_type=image_part_dict['mime_type'],
+                data=base64.b64decode(image_part_dict['data'])
+            )
+        )
+
         print(f"Asking Gemini with prompt: {prompt}")
-        response = genai_model.generate_content([prompt, image_part])
+        response = client.models.generate_content(
+            model=MODEL_NAME,
+            contents=[prompt, image_part_obj] # Pass the Part object
+        )
         print("Gemini Question Response:", response.text)
         return jsonify({"response": response.text})
+    except base64.binascii.Error as b64_error:
+        print(f"Error decoding base64 data: {b64_error}")
+        return jsonify({"message": f"Invalid base64 image data: {b64_error}"}), 400
     except Exception as e:
         print(f"Error calling Gemini API for question: {e}")
         error_message = str(e)
-        if hasattr(e, 'message'): error_message = e.message # Try to get more specific error
+        if "validation error" in error_message.lower():
+             try:
+                 import json
+                 details = json.loads(error_message.split('\n', 1)[1] if '\n' in error_message else error_message)
+                 first_error = details[0]['msg'] if isinstance(details, list) and details else "Invalid input structure"
+                 error_message = f"Input Validation Error: {first_error}"
+             except: pass
+        elif hasattr(e, 'message'): error_message = e.message
+        traceback.print_exc()
         return jsonify({"message": f"Error communicating with Gemini: {error_message}"}), 500
 
-# Placeholder function - assumes genai_model can handle image I/O prompts
-# You might need to adjust model_name or generation parameters depending on API capabilities
 @app.route('/api/gemini/generate-with-image', methods=['POST'])
 @require_image_data
 def gemini_generate_with_image(image_data_b64, request_data):
     print('Gemini Service: Generating based on image and prompt...')
-    if not genai_model:
-        return jsonify({"message": "Gemini model not initialized"}), 500
+    if not client:
+        return jsonify({"message": "Gemini client not initialized"}), 500
 
     prompt = request_data.get('prompt')
     if not prompt:
         return jsonify({"message": "Missing prompt"}), 400
 
-    image_part = base64_to_gemini_part(image_data_b64)
-    if not image_part:
+    image_part_dict = base64_to_gemini_part(image_data_b64)
+    if not image_part_dict:
         return jsonify({"message": "Could not process image data for Gemini"}), 400
 
     try:
-        # Construct the prompt for image generation/modification
-        # The exact format depends on what the model expects
-        # Example: might involve specific instructions like "Edit this image:"
-        full_prompt = [prompt, image_part]
+        # Create image content using Part/inline_data
+        image_part_obj = genai_types.Part(
+            inline_data=genai_types.Blob(
+                mime_type=image_part_dict['mime_type'],
+                data=base64.b64decode(image_part_dict['data'])
+            )
+        )
 
+        full_prompt = [prompt, image_part_obj] # Pass text prompt and Part object
         print(f"Generating with Gemini using prompt: {prompt}")
-        # This call might need adjustment based on the specific Gemini API
-        # for image generation/output. It might return structured data
-        # containing image bytes or a URL, not just text.
-        response = genai_model.generate_content(full_prompt)
 
-        # --- Process the response ---
-        # This part is HIGHLY dependent on the actual Gemini API response format
-        # for image generation. We'll assume it might have 'text' or image data.
+        # Try without the GenerationConfig first
+        response = client.models.generate_content(
+            model=GEMINI_IMAGE_GEN_MODEL_NAME,
+            contents=full_prompt,
+            config=genai_types.GenerateContentConfig(
+                response_modalities=['TEXT', 'IMAGE']
+            )
+        )
 
         response_text = None
         response_image_b64 = None
+        for part in response.candidates[0].content.parts:
+            if part.text is not None:
+                response_text = part.text
+            elif part.inline_data is not None:
+                b64_encoded = base64.b64encode(part.inline_data.data).decode('utf-8')
+                response_image_b64 = f"data:{part.inline_data.mime_type};base64,{b64_encoded}"
+                response_text = None # Prioritize image if found
 
-        # Attempt to extract text (standard response)
-        try:
-            response_text = response.text
-            print("Gemini Generation Response (Text):", response_text)
-        except Exception:
-             # Ignore if text extraction fails (might be image-only response)
-             pass
-
-        # TODO: Attempt to extract image data if the API supports it.
-        # This is a placeholder - you'll need to adapt based on Gemini's actual response.
-        # Example: If response contains image bytes in a specific part:
-        # if hasattr(response, 'parts') and len(response.parts) > 0:
-        #     img_part = response.parts[0] # Assuming the first part is the image
-        #     if hasattr(img_part, 'blob') and img_part.blob.mime_type.startswith('image/'):
-        #         img_bytes = img_part.blob.data
-        #         response_image_b64 = f"data:{img_part.blob.mime_type};base64," + base64.b64encode(img_bytes).decode('utf-8')
-        #         response_text = None # Clear text if we got an image
-        #         print("Gemini Generation Response (Image Received)")
-
-        # If no image was explicitly generated, return the text response
         if response_image_b64:
-             return jsonify({"response_text": None, "response_image_b64": response_image_b64})
+            print("Returning generated image.")
+            return jsonify({"response_text": None, "response_image_b64": response_image_b64})
         elif response_text:
-             return jsonify({"response_text": response_text, "response_image_b64": None})
+            print("Returning generated text.")
+            return jsonify({"response_text": response_text, "response_image_b64": None})
         else:
-             # Handle cases where response is empty or format is unexpected
-             print("Warning: Gemini generation response was empty or in unexpected format.")
-             return jsonify({"response_text": "Gemini returned an empty or unexpected response.", "response_image_b64": None})
+            print("Warning: Gemini generation response was empty or contained no recognizable parts.")
+            # Check for safety feedback or other reasons for empty response
+            safety_feedback = getattr(response, 'prompt_feedback', None)
+            if safety_feedback and safety_feedback.block_reason:
+                 error_msg = f"Blocked by safety filter: {safety_feedback.block_reason.name}"
+                 print(error_msg)
+                 return jsonify({"message": error_msg}), 400 # Return appropriate status
+            else:
+                 print(response)
+                 return jsonify({"response_text": "Gemini returned an empty or unexpected response.", "response_image_b64": None})
 
     except Exception as e:
         print(f"Error calling Gemini API for generation: {e}")
         error_message = str(e)
-        # Attempt to get more specific error details if available
         if hasattr(e, 'message'): error_message = e.message
         elif hasattr(e, 'response') and hasattr(e.response, 'text'): error_message = e.response.text
+        traceback.print_exc()
         return jsonify({"message": f"Error communicating with Gemini: {error_message}"}), 500
 
 # --- Run the App ---

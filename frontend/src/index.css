@@ -202,24 +202,45 @@ body {
 
 .cluster-item {
     display: flex;
+    flex-direction: column; /* Stack header and list vertically */
+    gap: 5px; /* Gap between header and list */
+    padding: 8px 5px;
+    border-bottom: 1px solid #eee;
+}
+
+.cluster-header {
+    display: flex;
     align-items: center;
     gap: 10px;
-    padding: 5px 0;
-    border-bottom: 1px solid #eee;
 }
 
 .cluster-item:last-child {
     border-bottom: none;
 }
 
-.cluster-item input[type="text"] {
+.cluster-header input[type="text"] {
     flex-grow: 1;
     padding: 4px 6px;
     border: 1px solid #ddd;
     border-radius: 3px;
 }
 
-.cluster-item span {
+.cluster-header span {
     font-size: 0.9em;
     color: #666;
+    white-space: nowrap;
+}
+
+.cluster-faces-list {
+    list-style: none;
+    padding-left: 15px; /* Indent the list */
+    margin: 5px 0 0 0;
+    font-size: 0.8em;
+    color: #555;
+    max-height: 60px; /* Limit height */
+    overflow-y: auto; /* Add scroll for many faces */
+}
+
+.cluster-face-item {
+    padding: 1px 0;
 } 
