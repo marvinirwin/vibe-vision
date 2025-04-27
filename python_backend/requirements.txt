@@ -1,0 +1,9 @@
+Flask
+python-dotenv
+google-generativeai
+Pillow
+numpy
+ultralytics
+deepface
+opencv-python # Often needed by deepface/ultralytics 
+ tf-keras

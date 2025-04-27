@@ -1,0 +1,225 @@
+/* Basic Reset */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
+    Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  background-color: #f0f0f0;
+  color: #333;
+}
+
+#root {
+  max-width: 1280px;
+  margin: 0 auto;
+  padding: 2rem;
+  text-align: center;
+}
+
+.App {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2rem;
+}
+
+.tile-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); /* Responsive grid */
+  gap: 1rem;
+  width: 100%;
+  max-width: 1200px; /* Limit overall grid width */
+  margin-top: 2rem;
+  align-items: start; /* Align items to the top of their grid cell */
+}
+
+/* Basic styling for tiles - adjusted for vertical layout */
+.tile {
+  /* position: relative; */ /* No longer needed for absolute overlay */
+  border: 1px solid #ccc;
+  background-color: #fff;
+  /* aspect-ratio: 16 / 9; */ /* Removed aspect ratio */
+  overflow: hidden; /* Still hide overflow */
+  display: flex;
+  flex-direction: column; /* Arrange children vertically */
+  /* justify-content: center; */ /* Removed */
+  /* align-items: center; */   /* Removed */
+  /* font-size: 0.9rem; */ /* Moved to specific elements */
+  /* color: #666; */
+  padding: 5px; /* Add some padding */
+}
+
+.tile img,
+.tile video {
+  display: block;
+  width: 100%; /* Take full width */
+  max-height: 300px; /* Limit media height to prevent huge tiles */
+  height: auto; /* Maintain aspect ratio based on width */
+  object-fit: contain;
+  background-color: #eee; /* Background for letter/pillarboxing */
+  margin-bottom: 5px; /* Space between media and controls */
+}
+
+/* Add specific styles for webcam and static image tiles if needed */
+.webcam-tile {
+  /* Specific styles for webcam tile */
+}
+
+.static-image-tile {
+  /* Specific styles for static image tile */
+}
+
+/* Container for the media element and the overlay canvas */
+.media-container {
+    position: relative; /* Needed for absolute positioning of the canvas */
+    width: 100%;
+    /* Height is determined by the contained image/video */
+    min-height: 100px; /* Prevent collapsing before media loads */
+    background-color: #eee; /* Show placeholder background */
+}
+
+.overlay-canvas {
+    /* Positioned via inline styles in the component */
+    pointer-events: none; /* Allows interaction with elements below if needed */
+}
+
+/* Remove absolute positioning from old actions */
+/* .tile-actions { ... removed ... } */
+
+/* Styling for the new controls container */
+.tile-gemini-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  width: 100%;
+  padding-top: 5px;
+  border-top: 1px solid #eee; /* Separator */
+}
+
+.tile-gemini-controls textarea {
+  width: 100%;
+  padding: 4px;
+  font-size: 0.9rem;
+  border: 1px solid #ccc;
+  border-radius: 3px;
+  resize: vertical; /* Allow vertical resize */
+}
+
+.tile-gemini-buttons {
+  display: flex;
+  gap: 5px;
+  justify-content: flex-end; /* Align buttons to the right */
+}
+
+.tile-gemini-buttons button {
+  padding: 3px 8px;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+
+.tile-gemini-status {
+  font-size: 0.8rem;
+  color: #666;
+  text-align: right;
+}
+
+.tile-gemini-status.error {
+    color: red;
+}
+
+.tile-gemini-response {
+  font-size: 0.9rem;
+  padding: 5px;
+  background-color: #f8f8f8;
+  border: 1px solid #eee;
+  border-radius: 3px;
+  margin-top: 5px;
+  text-align: left;
+  white-space: pre-wrap;
+  max-height: 100px; /* Limit response height */
+  overflow-y: auto; /* Allow scrolling for long responses */
+}
+
+.controls {
+    margin-bottom: 1rem;
+    display: flex;
+    gap: 1rem;
+    justify-content: center;
+    align-items: center;
+}
+
+.gemini-interaction {
+    margin-top: 2rem;
+    padding: 1rem;
+    border: 1px solid #ccc;
+    background-color: #fff;
+    width: 100%;
+    max-width: 800px;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+.gemini-interaction textarea {
+    width: 100%;
+    min-height: 50px;
+    padding: 0.5rem;
+    border: 1px solid #ccc;
+    border-radius: 4px;
+}
+
+.gemini-response {
+    margin-top: 0.5rem;
+    padding: 0.5rem;
+    background-color: #f9f9f9;
+    border: 1px solid #eee;
+    border-radius: 4px;
+    white-space: pre-wrap; /* Preserve whitespace and newlines */
+    text-align: left;
+}
+
+.clusters-section {
+    margin-top: 2rem;
+    padding: 1rem;
+    border: 1px solid #ccc;
+    background-color: #fff;
+    width: 100%;
+    max-width: 800px;
+}
+
+.clusters-section h2 {
+    margin-bottom: 1rem;
+    text-align: center;
+}
+
+.cluster-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 5px 0;
+    border-bottom: 1px solid #eee;
+}
+
+.cluster-item:last-child {
+    border-bottom: none;
+}
+
+.cluster-item input[type="text"] {
+    flex-grow: 1;
+    padding: 4px 6px;
+    border: 1px solid #ddd;
+    border-radius: 3px;
+}
+
+.cluster-item span {
+    font-size: 0.9em;
+    color: #666;
+} 
